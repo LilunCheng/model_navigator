@@ -71,7 +71,7 @@ def export(
     profiler_config: Optional[ProfilerConfig] = None,
 ) -> PackageDescriptor:
     """Function exports PyTorch model to all supported formats."""
-
+    print("Start export process ......")
     if model_name is None:
         model_name = get_default_model_name()
     if max_workspace_size is None:
