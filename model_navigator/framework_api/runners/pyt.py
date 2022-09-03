@@ -54,7 +54,10 @@ class PytRunner(BaseRunner):
             self.input_metadata.add(name, spec.dtype, spec.shape)
         self.output_names = output_names
         self._forward_kw_names = forward_kw_names
-
+        
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        torch.cuda.empty_cache()
+    
     def activate_impl(self):
         if isinstance(self._model, (str, Path)):
             self.model = torch.jit.load(str(self._model), map_location=self._target_device).eval()
