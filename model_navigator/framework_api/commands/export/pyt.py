@@ -147,5 +147,6 @@ class ExportPYT2ONNX(ExportBase):
                 args.extend([f"--{k}", s])
 
             context.execute_local_runtime_script(exporters.onnx.__file__, exporters.onnx.export, args)
-
+            
+        torch.cuda.empty_cache()
         return self.get_output_relative_path()
