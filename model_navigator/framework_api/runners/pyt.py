@@ -54,9 +54,6 @@ class PytRunner(BaseRunner):
             self.input_metadata.add(name, spec.dtype, spec.shape)
         self.output_names = output_names
         self._forward_kw_names = forward_kw_names
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        torch.cuda.empty_cache()
         
     def activate_impl(self):
         if isinstance(self._model, (str, Path)):
@@ -97,4 +94,5 @@ class PytRunner(BaseRunner):
             out_dict[name] = output.cpu().numpy()
         end = time.time()
         self.inference_time = end - start
+        torch.cuda.empty_cache()
         return out_dict
