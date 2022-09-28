@@ -117,7 +117,6 @@ def optimize_cmd(
     **kwargs,
 ):
     timer = Timer()
-    timer.start()
 
     init_logger(verbose=verbose)
     if config_path:
@@ -199,116 +198,122 @@ def optimize_cmd(
     device_kinds = get_available_device_kinds(gpus, instances_config)
     max_batch_size = _get_max_batch_size(profile_config)
 
-    convert_results = ctx.forward(
-        convert_cmd,
-        **dataclass2dict(instances_config),
-        **dataclass2dict(BatchingConfig(max_batch_size=max_batch_size)),
-    )
-    succeeded_convert_results = [
-        convert_result for convert_result in convert_results if convert_result.status.state == State.SUCCEEDED
-    ]
+    converted_dir = workspace.path / "converted"
 
-    # gather succeeded models; they should include source model if its matches requested target_formats
-    succeeded_models = [result.output_model for result in succeeded_convert_results]
+    if not converted_dir.is_dir():
+        convert_results = ctx.forward(
+            convert_cmd,
+            **dataclass2dict(instances_config),
+            **dataclass2dict(BatchingConfig(max_batch_size=max_batch_size)),
+        )
+    else:
+        # deploy and pre-check of model correctness with perf_analyzer
+        timer.start()
 
-    # deploy and pre-check of model correctness with perf_analyzer
-    interim_model_repository = workspace.path / "interim-model-store"
-    final_model_repository = workspace.path / "final-model-store"
+        results_store = ResultsStore(workspace)
+        convert_results = results_store.load("convert_model")
 
-    interim_model_repository.mkdir(parents=True, exist_ok=True)
-    final_model_repository.mkdir(parents=True, exist_ok=True)
+        succeeded_convert_results = [
+            convert_result for convert_result in convert_results if convert_result.status.state == State.SUCCEEDED
+        ]
+        succeeded_models = [result.output_model for result in succeeded_convert_results]
 
-    config_results = _configure_models_on_triton(
-        ctx=ctx,
-        output_model_store=interim_model_repository,
-        converted_models=succeeded_models,
-        instances_config=instances_config,
-        backend_config=backend_config,
-        batching_config=BatchingConfig(max_batch_size=1),
-        tensorrt_common_config=tensorrt_common_config,
-        dataset_profile_config=dataset_profile_config,
-        perf_measurement_config=perf_measurement_config,
-        model_signature_config=src_model_signature_config,
-        triton_config=triton_config,
-        triton_docker_image=triton_docker_image,
-        device_kinds=device_kinds,
-        gpus=gpus,
-        workspace=workspace,
-    )
+        interim_model_repository = workspace.path / "interim-model-store"
+        final_model_repository = workspace.path / "final-model-store"
+        interim_model_repository.mkdir(parents=True, exist_ok=True)
+        final_model_repository.mkdir(parents=True, exist_ok=True)
 
-    # move when triton server for testing purposes is shutdown
-    results_to_analyze = []
-    for config_result in sorted(config_results, key=lambda item: item.model_config_name):
-        if config_result.status.state == State.FAILED:
-            LOGGER.warning(config_result.status.message)
-            continue
-
-        src_dir = config_result.model_config_path
-        dst_dir = final_model_repository / src_dir.name
-        LOGGER.info(f"Model {config_result.model_config_name} evaluation succeed. Moving for profiling.")
-        LOGGER.debug(f"Moving model dir between model stores: {src_dir} -> {dst_dir}")
-        shutil.move(src_dir.as_posix(), dst_dir.as_posix())
-        results_to_analyze.append(dst_dir.name)
-
-    if not results_to_analyze:
-        sys.exit(
-            "No models promoted to profiling and analysis. Please, review the error logs and verify the input model."
+        config_results = _configure_models_on_triton(
+            ctx=ctx,
+            output_model_store=interim_model_repository,
+            converted_models=succeeded_models,
+            instances_config=instances_config,
+            backend_config=backend_config,
+            batching_config=BatchingConfig(max_batch_size=1),
+            tensorrt_common_config=tensorrt_common_config,
+            dataset_profile_config=dataset_profile_config,
+            perf_measurement_config=perf_measurement_config,
+            model_signature_config=src_model_signature_config,
+            triton_config=triton_config,
+            triton_docker_image=triton_docker_image,
+            device_kinds=device_kinds,
+            gpus=gpus,
+            workspace=workspace,
         )
 
-    LOGGER.info("Running Model Analyzer profiling for promoted models")
-    profile_result: ProfileResult = ctx.forward(
-        profile_cmd,
-        **dataclass2dict(triton_config),
-        model_repository=final_model_repository,
-        **dataclass2dict(profile_config),
-        **dataclass2dict(perf_measurement_config),
-    )
-    if profile_result.status.state != State.SUCCEEDED:
-        sys.exit(f"Model Analyzer profiling failed with message: {profile_result.status.message}")
+        # move when triton server for testing purposes is shutdown
+        results_to_analyze = []
+        for config_result in sorted(config_results, key=lambda item: item.model_config_name):
+            if config_result.status.state == State.FAILED:
+                LOGGER.warning(config_result.status.message)
+                continue
 
-    LOGGER.info("Running Model Analyzer analysis for profiled models")
-    analyze_results: List[AnalyzeResult] = ctx.forward(
-        analyze_cmd,
-        **dataclass2dict(analysis_config),
-        model_repository=final_model_repository,
-    )
+            src_dir = config_result.model_config_path
+            dst_dir = final_model_repository / src_dir.name
+            LOGGER.info(f"Model {config_result.model_config_name} evaluation succeed. Moving for profiling.")
+            LOGGER.debug(f"Moving model dir between model stores: {src_dir} -> {dst_dir}")
+            shutil.move(src_dir.as_posix(), dst_dir.as_posix())
+            results_to_analyze.append(dst_dir.name)
 
-    failed_results: List[AnalyzeResult] = [
-        analyze_result for analyze_result in analyze_results if analyze_result.status.state == State.FAILED
-    ]
-    if failed_results:
-        for result in failed_results:
-            LOGGER.error(
-                f"Model Analyzer analysis failed for {result.model_config_path} with message: {result.status.message}"
+        if not results_to_analyze:
+            sys.exit(
+                "No models promoted to profiling and analysis. Please, review the error logs and verify the input model."
             )
-        sys.exit("Model Analyzer analysis failed. Please, review the log.")
 
-    create_helm_chart_results = []
-    LOGGER.info(f"Running Helm Chart generator for top {analysis_config.top_n_configs} configs")
-    for analyze_result in analyze_results:
-        charts_repository = workspace.path / "helm_charts"
-
-        selected_conversion_set_config = _obtain_conversion_config(analyze_result, succeeded_convert_results)
-
-        create_helm_chart_result = ctx.forward(
-            helm_chart_create_cmd,
-            charts_repository=charts_repository,
-            chart_name=analyze_result.model_config_path,
-            **dataclass2dict(selected_conversion_set_config),
-            **dataclass2dict(analyze_result.optimization_config),
-            **dataclass2dict(analyze_result.batching_config),
-            **dataclass2dict(analyze_result.instances_config),
+        LOGGER.info("Running Model Analyzer profiling for promoted models")
+        profile_result: ProfileResult = ctx.forward(
+            profile_cmd,
+            **dataclass2dict(triton_config),
+            model_repository=final_model_repository,
+            **dataclass2dict(profile_config),
+            **dataclass2dict(perf_measurement_config),
         )
-        create_helm_chart_results.append(create_helm_chart_result)
+        if profile_result.status.state != State.SUCCEEDED:
+            sys.exit(f"Model Analyzer profiling failed with message: {profile_result.status.message}")
 
-        if create_helm_chart_result.status.state != State.SUCCEEDED:
-            LOGGER.warning(f"Helm Chart generation failed with message: {create_helm_chart_result.status.message}")
-    results_store = ResultsStore(workspace)
-    results_store.dump("helm_chart_create", create_helm_chart_results)
-    output_package_path = _get_output_package_path(src_model_config, output_package)
+        LOGGER.info("Running Model Analyzer analysis for profiled models")
+        analyze_results: List[AnalyzeResult] = ctx.forward(
+            analyze_cmd,
+            **dataclass2dict(analysis_config),
+            model_repository=final_model_repository,
+        )
 
-    timer.stop()
-    pack_workspace(workspace, output_package_path, arguments, duration=timer.duration())
+        failed_results: List[AnalyzeResult] = [
+            analyze_result for analyze_result in analyze_results if analyze_result.status.state == State.FAILED
+        ]
+        if failed_results:
+            for result in failed_results:
+                LOGGER.error(
+                    f"Model Analyzer analysis failed for {result.model_config_path} with message: {result.status.message}"
+                )
+            sys.exit("Model Analyzer analysis failed. Please, review the log.")
+
+        create_helm_chart_results = []
+        LOGGER.info(f"Running Helm Chart generator for top {analysis_config.top_n_configs} configs")
+        for analyze_result in analyze_results:
+            charts_repository = workspace.path / "helm_charts"
+
+            selected_conversion_set_config = _obtain_conversion_config(analyze_result, succeeded_convert_results)
+
+            create_helm_chart_result = ctx.forward(
+                helm_chart_create_cmd,
+                charts_repository=charts_repository,
+                chart_name=analyze_result.model_config_path,
+                **dataclass2dict(selected_conversion_set_config),
+                **dataclass2dict(analyze_result.optimization_config),
+                **dataclass2dict(analyze_result.batching_config),
+                **dataclass2dict(analyze_result.instances_config),
+            )
+            create_helm_chart_results.append(create_helm_chart_result)
+
+            if create_helm_chart_result.status.state != State.SUCCEEDED:
+                LOGGER.warning(f"Helm Chart generation failed with message: {create_helm_chart_result.status.message}")
+        results_store = ResultsStore(workspace)
+        results_store.dump("helm_chart_create", create_helm_chart_results)
+        output_package_path = _get_output_package_path(src_model_config, output_package)
+
+        timer.stop()
+        pack_workspace(workspace, output_package_path, arguments, duration=timer.duration())
 
 
 def _get_output_package_path(model_config, output_package):
