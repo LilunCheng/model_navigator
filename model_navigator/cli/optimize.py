@@ -200,12 +200,19 @@ def optimize_cmd(
 
     converted_dir = workspace.path / "converted"
 
+    interim_model_repository = workspace.path / "interim-model-store"
+    final_model_repository = workspace.path / "final-model-store"
+
     if not converted_dir.is_dir():
         convert_results = ctx.forward(
             convert_cmd,
             **dataclass2dict(instances_config),
             **dataclass2dict(BatchingConfig(max_batch_size=max_batch_size)),
         )
+
+        interim_model_repository.mkdir(parents=True, exist_ok=True)
+        final_model_repository.mkdir(parents=True, exist_ok=True)
+        
     else:
         # deploy and pre-check of model correctness with perf_analyzer
         timer.start()
@@ -217,11 +224,6 @@ def optimize_cmd(
             convert_result for convert_result in convert_results if convert_result.status.state == State.SUCCEEDED
         ]
         succeeded_models = [result.output_model for result in succeeded_convert_results]
-
-        interim_model_repository = workspace.path / "interim-model-store"
-        final_model_repository = workspace.path / "final-model-store"
-        interim_model_repository.mkdir(parents=True, exist_ok=True)
-        final_model_repository.mkdir(parents=True, exist_ok=True)
 
         config_results = _configure_models_on_triton(
             ctx=ctx,
@@ -433,7 +435,7 @@ def _configure_models_on_triton(
                     continue
 
                 triton_server.set_gpus(gpus[: variant.num_required_gpus])
-                triton_server.start()
+                #triton_server.start()
                 triton_client = triton_server.create_grpc_client()
                 triton_client_config = TritonClientConfig(server_url=triton_client.server_url)
                 # other Triton related configuration are forwarded with ctx.forward
@@ -470,7 +472,7 @@ def _configure_models_on_triton(
                     error_logs.append(evaluate_result.log)
                     continue
             finally:
-                triton_server.stop()
+                #triton_server.stop()
 
                 if error_logs:
                     server_log = triton_server.logs()
